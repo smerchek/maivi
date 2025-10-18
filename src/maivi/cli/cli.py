@@ -3,7 +3,7 @@
 CLI interface for STT server.
 """
 import argparse
-from maivi.cli.server import StreamingSTTServer
+import sys
 
 
 def main():
@@ -12,49 +12,38 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Start server (clipboard only)
-  python cli.py
+  # Start daemon (keeps model loaded, responds to IPC)
+  maivi-cli daemon
 
-  # Start server with auto-paste
-  python cli.py --auto-paste
+  # Start daemon in background
+  maivi-cli daemon --detach
 
-  # Start with streaming mode (real-time transcription)
-  python cli.py --stream
+  # Toggle recording (daemon must be running)
+  maivi-cli toggle
 
-  # Streaming with auto-paste
-  python cli.py --stream --auto-paste
+  # Check daemon status
+  maivi-cli status
 
-  # Configure streaming parameters (optimized defaults: 7s window, 0.5s slide)
-  python cli.py --stream --window 7 --slide 0.5 --delay 6
+  # Stop daemon
+  maivi-cli daemon stop
 
-  # Use speed adjustment (speak at normal speed, record at 2x)
-  python cli.py --speed 2.0
+  # Legacy: Start server (clipboard only)
+  maivi-cli server
 
-  # Combine speed with streaming
-  python cli.py --stream --speed 1.5
+  # Legacy: Start server with auto-paste
+  maivi-cli server --auto-paste
 
-  # Toggle mode (press once to start, again to stop)
-  python cli.py --stream --toggle
+  # Legacy: Toggle mode (press once to start, again to stop)
+  maivi-cli server --toggle
 
-  # Stream to file for voice command detection
-  python cli.py --stream --output-file transcription.txt
+  # Legacy: Show live UI window with transcription
+  maivi-cli server --toggle --show-ui
 
-  # Show live UI window with transcription (recommended!)
-  python cli.py --stream --toggle --show-ui
-
-  # Custom UI width
-  python cli.py --stream --show-ui --ui-width 50
-
-  # Full featured - toggle mode + UI + notifications
-  python cli.py --stream --toggle --show-ui --ui-width 50
-
-Usage:
-  1. Start the server
-  2. Hold Alt+Q (Option+Q on macOS) to record (or press once in toggle mode)
-  3. Release to stop and transcribe (or press again in toggle mode)
-  4. Text is copied to clipboard
-  5. If --auto-paste is enabled, text is pasted automatically
-  6. Press Esc to exit
+Daemon Mode (Recommended):
+  - Keeps model loaded in background (no 10s startup delay)
+  - Use 'maivi-cli toggle' from Hyprland keybind
+  - Instant response to recording commands
+  - Bind in Hyprland: bind = SUPER, R, exec, maivi-cli toggle
 
 Streaming Mode (SIMPLE OVERLAPPING CHUNKS):
   - Fixed 7s chunks with 4s overlap (3s slide)
@@ -65,6 +54,87 @@ Streaming Mode (SIMPLE OVERLAPPING CHUNKS):
         """,
     )
 
+    # Add subcommands
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+
+    # Daemon subcommand
+    daemon_parser = subparsers.add_parser('daemon', help='Run as daemon (keeps model loaded)')
+    daemon_parser.add_argument(
+        '--detach',
+        action='store_true',
+        help='Run daemon in background'
+    )
+    daemon_parser.add_argument(
+        'daemon_action',
+        nargs='?',
+        choices=['start', 'stop'],
+        default='start',
+        help='Daemon action (default: start)'
+    )
+    _add_server_args(daemon_parser)
+
+    # Toggle subcommand
+    subparsers.add_parser('toggle', help='Toggle recording (daemon must be running)')
+
+    # Status subcommand
+    subparsers.add_parser('status', help='Check daemon status')
+
+    # Server subcommand (legacy mode)
+    server_parser = subparsers.add_parser('server', help='Run in server mode (legacy, with keyboard listener)')
+    _add_server_args(server_parser)
+
+    # Also support old behavior (no subcommand = server mode)
+    _add_server_args(parser)
+
+    args = parser.parse_args()
+
+    # Handle commands
+    if args.command == 'daemon':
+        from maivi.cli.client import MaiviClient
+        from maivi.cli.daemon import MaiviDaemon
+
+        if args.daemon_action == 'stop':
+            client = MaiviClient()
+            sys.exit(client.stop_daemon())
+        else:
+            # Start daemon
+            daemon = MaiviDaemon(
+                auto_paste=getattr(args, 'auto_paste', False),
+                window_seconds=getattr(args, 'window', 7.0),
+                slide_seconds=getattr(args, 'slide', 3.0),
+                start_delay_seconds=getattr(args, 'delay', 2.0),
+                speed=getattr(args, 'speed', 1.0),
+                output_file=getattr(args, 'output_file', None),
+                show_ui=getattr(args, 'show_ui', False),
+                ui_width=getattr(args, 'ui_width', 30),
+                pause_paragraph_breaks=not getattr(args, 'no_pause_breaks', False),
+                pause_threshold_seconds=getattr(args, 'pause_threshold', 1.0),
+            )
+            daemon.run(detach=args.detach)
+            sys.exit(0)
+
+    elif args.command == 'toggle':
+        from maivi.cli.client import MaiviClient
+        client = MaiviClient()
+        sys.exit(client.toggle())
+
+    elif args.command == 'status':
+        from maivi.cli.client import MaiviClient
+        client = MaiviClient()
+        sys.exit(client.status())
+
+    elif args.command == 'server' or args.command is None:
+        # Legacy server mode or no subcommand
+        _run_server(args)
+        sys.exit(0)
+
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+def _add_server_args(parser):
+    """Add server-specific arguments to parser."""
     parser.add_argument(
         "-p",
         "--auto-paste",
@@ -154,10 +224,13 @@ Streaming Mode (SIMPLE OVERLAPPING CHUNKS):
         help="Minimum pause duration for paragraph break in seconds (default: 1.0)",
     )
 
-    args = parser.parse_args()
+
+def _run_server(args):
+    """Run the server in legacy mode."""
+    from maivi.cli.server import StreamingSTTServer
+    from maivi.utils.ffmpeg_installer import ensure_ffmpeg_installed
 
     # Check for FFmpeg (optional but recommended for advanced audio processing)
-    from maivi.utils.ffmpeg_installer import ensure_ffmpeg_installed
     ensure_ffmpeg_installed(silent=False)
     print()
 
