@@ -511,6 +511,13 @@ Raw transcript:
                     self.chunk_counter = 0
                     self.recording_start_time = time.time()  # Track start time for hybrid mode
 
+                    # Show notification to clear cached text from previous transcription
+                    self._show_notification(
+                        "Recording...",
+                        "Listening for your voice",
+                        timeout=2
+                    )
+
                     # Start streaming UI if enabled
                     if self.streaming_ui:
                         self.streaming_ui.start()
@@ -531,6 +538,13 @@ Raw transcript:
                     self.hotkey_pressed = True
                     self.chunk_counter = 0
                     self.recording_start_time = time.time()  # Track start time for hybrid mode
+
+                    # Show notification to clear cached text from previous transcription
+                    self._show_notification(
+                        "Recording...",
+                        "Listening for your voice",
+                        timeout=2
+                    )
 
                     # Start streaming UI if enabled
                     if self.streaming_ui:

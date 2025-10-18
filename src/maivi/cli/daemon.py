@@ -91,6 +91,19 @@ class MaiviDaemon:
                     self.server.chunk_counter = 0
                     self.server.recording_start_time = __import__('time').time()
 
+                    # Clear output file for waybar indicator (truncate existing stream)
+                    if self.server.output_stream:
+                        self.server.output_stream.seek(0)
+                        self.server.output_stream.truncate()
+                        self.server.output_stream.flush()
+
+                    # Show notification to clear cached text from previous transcription
+                    self.server._show_notification(
+                        "Recording...",
+                        "Listening for your voice",
+                        timeout=2
+                    )
+
                     # Start streaming UI if enabled
                     if self.server.streaming_ui:
                         self.server.streaming_ui.start()
