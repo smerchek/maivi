@@ -7,6 +7,7 @@ import time
 import threading
 import subprocess
 import shutil
+import json
 from pathlib import Path
 
 import nemo.collections.asr as nemo_asr
@@ -150,6 +151,160 @@ class StreamingSTTServer:
         except Exception as e:
             print(f"⚠️  Auto-paste failed: {e}")
 
+    def _get_focused_window_context(self):
+        """Get context from the currently focused window."""
+        try:
+            # Get active window class and title
+            active_window = subprocess.run(
+                ['hyprctl', 'activewindow', '-j'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if active_window.returncode == 0:
+                window_info = json.loads(active_window.stdout)
+                window_class = window_info.get('class', '')
+                window_title = window_info.get('title', '')
+
+                # Try to extract CWD from terminal windows
+                terminal_classes = ['Alacritty', 'kitty', 'foot', 'wezterm', 'ghostty']
+                if any(term in window_class for term in terminal_classes):
+                    # Try to get CWD from terminal PID
+                    pid = window_info.get('pid')
+                    if pid:
+                        try:
+                            # Get all child processes
+                            pgrep = subprocess.run(
+                                ['pgrep', '-P', str(pid)],
+                                capture_output=True,
+                                text=True,
+                                timeout=1
+                            )
+                            if pgrep.returncode == 0:
+                                child_pids = pgrep.stdout.strip().split('\n')
+                                # Get CWD from first child process (usually the shell)
+                                for child_pid in child_pids:
+                                    cwd_path = Path(f'/proc/{child_pid}/cwd')
+                                    if cwd_path.exists():
+                                        cwd = os.readlink(cwd_path)
+                                        return cwd, window_title
+                        except:
+                            pass
+
+                # For other windows, return title for context
+                return None, window_title
+        except:
+            pass
+
+        return None, None
+
+    def _cleanup_transcript_with_claude(self, text):
+        """Clean up transcript using Claude CLI with context awareness."""
+        try:
+            # Get focused window context
+            cwd, window_title = self._get_focused_window_context()
+
+            # Build context-aware prompt
+            context_parts = []
+
+            if cwd:
+                context_parts.append(f"Working directory: {cwd}")
+
+                # Try to get git repo info for additional context
+                try:
+                    git_root = subprocess.run(
+                        ['git', 'rev-parse', '--show-toplevel'],
+                        cwd=cwd,
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    ).stdout.strip()
+                    if git_root:
+                        project_name = os.path.basename(git_root)
+                        context_parts.append(f"Project: {project_name}")
+                except:
+                    pass
+
+            if window_title:
+                context_parts.append(f"Active window: {window_title}")
+
+            if not context_parts:
+                context_parts.append("Working directory: unknown")
+
+            context_info = "\n".join(context_parts)
+
+            cleanup_prompt = f"""You are a transcription cleanup assistant. Your ONLY job is to output the cleaned transcription - nothing else.
+
+CRITICAL RULES:
+- Only output "NO_DATA" if the transcript has LESS THAN 5 WORDS after removing filler
+- Always try to extract meaning even from messy transcripts
+- DO NOT ask questions
+- DO NOT add explanations or meta-commentary
+- DO NOT output anything except the cleaned text or "NO_DATA"
+
+Context:
+{context_info}
+
+Cleanup Rules:
+1. Remove filler words: um, uh, like, you know, ..., etc
+2. Fix punctuation, capitalization, and grammar
+3. Correct technical terms, file names, variable names based on context
+4. Add appropriate line breaks between distinct thoughts or topics
+5. Format lists properly (bullet points or numbered)
+6. If dictating numbered/lettered answers (1, 2, 3 or A, B, C), format them clearly
+7. Keep the original meaning and intent
+8. Break up long run-on paragraphs into readable chunks
+
+Examples:
+Input: "Uh-"
+Output: NO_DATA
+
+Input: "um like you know... uh..."
+Output: NO_DATA
+
+Input: "uh okay so I need to fix the config file"
+Output: I need to fix the config file.
+
+Input: "Oh ... I don't know. ... Oh, you are recording? ... Like why? ... Why isn't Waybar updating?"
+Output: I don't know. Are you recording? Why isn't Waybar updating?
+
+Raw transcript:
+{text}"""
+
+            # Debug: Log the context being sent to Claude
+            print(f"\n🔍 Context sent to Claude:")
+            print(f"{'='*60}")
+            print(context_info)
+            print(f"{'='*60}\n")
+
+            # Run Claude CLI with haiku model for speed
+            result = subprocess.run(
+                ['claude', '--model', 'haiku', '-p', cleanup_prompt],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                cleaned = result.stdout.strip()
+
+                # Check if Claude returned NO_DATA (transcript too short/incomplete)
+                if cleaned == "NO_DATA":
+                    print("⚠️ Transcript too short or incomplete, skipping")
+                    return None  # Signal to skip clipboard copy
+
+                print("🤖 Claude cleanup applied")
+                return cleaned
+            else:
+                print(f"⚠️ Claude cleanup failed, using original text")
+                if result.stderr:
+                    print(f"   Error: {result.stderr[:100]}")
+                return text
+
+        except Exception as e:
+            print(f"⚠️ Claude cleanup error: {e}")
+            return text
+
     def _show_notification(self, title: str, message: str, timeout: int = 2):
         """Show cross-platform notification (non-blocking)."""
         if not NOTIFICATIONS_AVAILABLE:
@@ -281,12 +436,32 @@ class StreamingSTTServer:
         print(final_text)
         print(f"{'=' * 60}\n")
 
+        # Clean up transcript with Claude
+        cleaned_text = self._cleanup_transcript_with_claude(final_text)
+
+        # Check if cleanup returned None (transcript too short)
+        if cleaned_text is None:
+            print("⚠️ Transcript too short, not copying to clipboard")
+            self._show_notification(
+                "Recording too short",
+                "Please record a longer message",
+                timeout=2
+            )
+            return
+
+        if cleaned_text != final_text:
+            print(f"\n{'=' * 60}")
+            print(f"✨ Cleaned Transcription:")
+            print(f"{'=' * 60}")
+            print(cleaned_text)
+            print(f"{'=' * 60}\n")
+
         # Copy to clipboard
-        pyperclip.copy(final_text)
+        pyperclip.copy(cleaned_text)
         print(f"✓ Copied to clipboard")
 
         # Show notification IMMEDIATELY - don't wait!
-        preview = final_text[:50] + "..." if len(final_text) > 50 else final_text
+        preview = cleaned_text[:50] + "..." if len(cleaned_text) > 50 else cleaned_text
         self._show_notification(
             "Copied to clipboard!",
             preview,
@@ -403,12 +578,32 @@ class StreamingSTTServer:
                 if text:
                     print(f"\n📝 Transcribed: {text}\n")
 
+                    # Clean up transcript with Claude
+                    cleaned_text = self._cleanup_transcript_with_claude(text)
+
+                    # Check if cleanup returned None (transcript too short)
+                    if cleaned_text is None:
+                        print("⚠️ Transcript too short, not copying to clipboard")
+                        self._show_notification(
+                            "Recording too short",
+                            "Please record a longer message",
+                            timeout=2
+                        )
+                        return
+
+                    if cleaned_text != text:
+                        print(f"\n{'=' * 60}")
+                        print(f"✨ Cleaned Transcription:")
+                        print(f"{'=' * 60}")
+                        print(cleaned_text)
+                        print(f"{'=' * 60}\n")
+
                     # Copy to clipboard immediately
-                    pyperclip.copy(text)
+                    pyperclip.copy(cleaned_text)
                     print(f"✓ Copied to clipboard")
 
                     # Show notification RIGHT AWAY
-                    preview = text[:50] + "..." if len(text) > 50 else text
+                    preview = cleaned_text[:50] + "..." if len(cleaned_text) > 50 else cleaned_text
                     self._show_notification(
                         "Copied to clipboard!",
                         preview,
