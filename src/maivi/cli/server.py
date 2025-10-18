@@ -5,13 +5,15 @@ Processes audio chunks as they're recorded using a sliding window.
 import os
 import time
 import threading
+import subprocess
+import shutil
 from pathlib import Path
 
 import nemo.collections.asr as nemo_asr
 import pyperclip
 import soundfile as sf
 from pynput import keyboard
-from pynput.keyboard import Key, Controller
+from pynput.keyboard import Key
 
 from maivi.core.streaming_recorder import StreamingRecorder
 from maivi.core.chunk_merger import SimpleChunkMerger  # New simple merger
@@ -54,8 +56,10 @@ class StreamingSTTServer:
             start_delay_seconds=start_delay_seconds,
             speed=speed,
         )
-        self.keyboard_controller = Controller()
         self.is_shutting_down = False
+
+        # Detect Wayland and choose appropriate paste method
+        self._detect_paste_method()
 
         # Track which keys are pressed for hotkey detection
         self.current_keys = set()
@@ -88,6 +92,63 @@ class StreamingSTTServer:
         )
         self.last_chunk_audio = None  # Store last chunk audio for pause detection
         self.recording_start_time = None  # Track when recording started
+
+    def _detect_paste_method(self):
+        """Detect display server and available paste tools."""
+        self.paste_method = None
+
+        # Check if we're on Wayland
+        wayland_display = os.environ.get('WAYLAND_DISPLAY')
+        xdg_session_type = os.environ.get('XDG_SESSION_TYPE', '').lower()
+        is_wayland = wayland_display or xdg_session_type == 'wayland'
+
+        if is_wayland:
+            # On Wayland, try wtype first, then ydotool
+            if shutil.which('wtype'):
+                self.paste_method = 'wtype'
+            elif shutil.which('ydotool'):
+                self.paste_method = 'ydotool'
+            else:
+                self.paste_method = None
+                if self.auto_paste:
+                    print("⚠️  Warning: Auto-paste not available on Wayland")
+                    print("    Install wtype: sudo pacman -S wtype")
+        else:
+            # On X11, use pynput
+            self.paste_method = 'pynput'
+
+    def _auto_paste_text(self):
+        """Paste text using the detected method."""
+        if not self.auto_paste:
+            return
+
+        time.sleep(0.2)  # Small delay
+
+        try:
+            if self.paste_method == 'wtype':
+                # Wayland with wtype
+                subprocess.run(['wtype', '-M', 'ctrl', '-M', 'shift', 'v'], check=False)
+            elif self.paste_method == 'ydotool':
+                # Wayland with ydotool
+                subprocess.run(['ydotool', 'key', '29:1', '42:1', '47:1', '47:0', '42:0', '29:0'], check=False)
+            elif self.paste_method == 'pynput':
+                # X11 with pynput
+                from pynput.keyboard import Controller
+                kb = Controller()
+                kb.press(Key.ctrl)
+                kb.press(Key.shift)
+                kb.press('v')
+                kb.release('v')
+                kb.release(Key.shift)
+                kb.release(Key.ctrl)
+            else:
+                print("⚠️  Auto-paste not available")
+                return
+
+            print(f"✓ Auto-pasted")
+
+        except Exception as e:
+            print(f"⚠️  Auto-paste failed: {e}")
 
     def _show_notification(self, title: str, message: str, timeout: int = 2):
         """Show cross-platform notification (non-blocking)."""
@@ -236,13 +297,7 @@ class StreamingSTTServer:
         time.sleep(0.1)
 
         # Auto-paste if enabled
-        if self.auto_paste:
-            time.sleep(0.2)
-            self.keyboard_controller.press(Key.ctrl)
-            self.keyboard_controller.press("v")
-            self.keyboard_controller.release("v")
-            self.keyboard_controller.release(Key.ctrl)
-            print(f"✓ Auto-pasted")
+        self._auto_paste_text()
 
         print()
 
@@ -361,13 +416,7 @@ class StreamingSTTServer:
                     )
 
                     # Auto-paste if enabled
-                    if self.auto_paste:
-                        time.sleep(0.2)
-                        self.keyboard_controller.press(Key.ctrl)
-                        self.keyboard_controller.press("v")
-                        self.keyboard_controller.release("v")
-                        self.keyboard_controller.release(Key.ctrl)
-                        print(f"✓ Auto-pasted")
+                    self._auto_paste_text()
                 else:
                     print("No text transcribed")
                     self._show_notification("STT Server", "No text transcribed", timeout=2)
